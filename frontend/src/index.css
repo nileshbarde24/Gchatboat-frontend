@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700&display=swap');
+
+* {
+  font-family: 'Space Mono', sans-serif;
+}
+
+
+.my-facebook-button-class {
+  border: 1px solid rgb(237, 235, 235); 
+  padding: 8px; 
+  background-color: rgb(255, 255, 255);
+    border-radius: 4px;
+    opacity: 40;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  
+  }
+.my-facebook-button-class:hover{
+  background-color: rgb(247, 247, 247);
+}
+
+
+
+
+

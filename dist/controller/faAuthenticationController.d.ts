@@ -1,0 +1,11 @@
+import { Request, Response } from "express";
+declare function getTwoFactorSetup(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+declare function verifyTwoFactorSetup(req: Request, res: Response): Promise<void>;
+declare function verifyTwoFactorCode(req: Request, res: Response): Promise<void>;
+declare function updateToFaUserById(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+declare function getUserByEmailPassword(req: Request, res: Response): Promise<Response<any, Record<string, any>> | undefined>;
+declare function updateMFAUserByEmail(req: any, res: any): Promise<any>;
+declare function sendOtpForAuthMobile(req: Request, res: Response): Promise<void>;
+declare function verifyOtpForAuthMobile(req: Request, res: Response): Promise<void>;
+declare function removeMFA(req: any, res: any): Promise<any>;
+export { getTwoFactorSetup, verifyTwoFactorSetup, updateToFaUserById, verifyTwoFactorCode, getUserByEmailPassword, updateMFAUserByEmail, sendOtpForAuthMobile, verifyOtpForAuthMobile, removeMFA };

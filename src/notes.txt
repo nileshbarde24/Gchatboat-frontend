@@ -1,0 +1,1013 @@
+# Vector Search - filter numeric value:
+ {
+   "equals": {
+     "path": "loc.pageNumber",
+     "value": 312
+    }
+ }
+
+
+ 
+// modelName: 'gpt-3.5-turbo-16k',
+// modelName: 'gpt-4-1106-preview' // works 128K tokens
+
+
+// @ts-ignore
+// import { compile } from "html-to-text";
+// import { RecursiveUrlLoader } from "langchain/document_loaders/web/recursive_url";
+app.post('/web-scraping', async (req, res) => {
+    try {
+        // const loader = new PuppeteerWebBaseLoader("https://www.tabnews.com.br/")
+        // const loader = new CheerioWebBaseLoader(req.body.url);
+
+        // const url = 'https://www.nationalgeographic.com/travel/article/space-themed-trips-for-families';
+        const url = req.body.url;
+
+        const compiledConvert = compile({ wordwrap: 130 }); // returns (text: string) => string;
+
+        const loader = new RecursiveUrlLoader(url, {
+            extractor: compiledConvert,
+            maxDepth: 0,
+            excludeDirs: [''], // list of urls to exclude
+        });
+
+        const documents = await loader.load();
+        // @ts-ignore
+        const flattenedDocuments = documents.reduce((acc, val) => acc.concat(val), []);
+        const vectorStore = await getVectorStore();
+        await vectorStore.addDocuments(flattenedDocuments);
+        res.status(200).json({ message: 'Documents added successfully' });
+    } catch (error) {
+        res.status(500).json(error)
+    }
+})
+
+
+
+
+// TODO: UPLOAD FILE ON SERVER B
+const fileData = fs.createReadStream(req.file.path);
+const fileName = req.file.filename
+
+Replace with Server B's IP address and port
+const serverBUrl = 'http://localhost:9000/upload';
+const response = await axios.post(serverBUrl, fileData, {
+    headers: {
+         'Content-Type': 'application/octet-stream',
+        'X-Filename': fileName,
+        Add any additional headers or authentication as needed
+    },
+});
+
+console.log("Server B Uploaded file repsonse: ", response.data);
+fs.unlinkSync(uploadedFilePath); //delete file from uploaded folder once its uploaded on the server
+// TODO: UPLOAD FILE ON SERVER B
+
+
+
+// TODO: move to DBvectorstore utils
+async function getVectorStore() {
+    const vectorStore = new MongoDBAtlasVectorSearch(new OpenAIEmbeddings(), {
+        collection,
+        indexName: "default",
+        textKey: "text", 
+        embeddingKey: "embedding", 
+    });
+
+    return vectorStore;
+}
+
+// TODO: move to DBvectorstore utils
+async function getMemoryVectorStore() {
+    const historyCollection = client.db("sample_db").collection("search_history");
+    const vectorStore = new MongoDBAtlasVectorSearch(new OpenAIEmbeddings(), {
+        collection: historyCollection,
+        indexName: "history",
+        textKey: "text",
+        embeddingKey: "embedding",
+    });
+    return vectorStore
+}
+
+// TODO: move to DBvectorstore utils
+async function addChatLogs(question: string, answer: string) {
+    const timestamp = new Date().toISOString();
+    const collection = client.db(dbName).collection('chat_logs');
+    await collection.insertOne({
+        question,
+        answer,
+        timestamp
+    });
+}
+
+// @ts-ignore
+async function storeFileToDB(filename: string, userId: string) {
+    const timestamp = new Date().toISOString();
+    let serverURL
+    if (process.env.ENVIRONMENT === 'local') {
+        console.log("Local ENV")
+        serverURL = `http://localhost:3000/uploads/${filename}`;
+    } else {
+        // serverURL = `http://192.168.178.102:3000/uploads/${filename}`;
+        serverURL = `https://ai.generativegeniuses.com/uploads/${filename}`;
+    }
+
+    console.log({ serverURL });
+    // TODO: Save uploadd file on server:
+    const collection = client.db(dbName).collection('file_storage');
+    try {
+        const resp = await collection.insertOne({
+            userId: new ObjectId(userId), // replaced with logged in user id
+            filename: filename,
+            url: serverURL, // repalced with actual uploaded sercer path
+            timestamp
+        });
+        return resp
+    } catch (error) {
+        console.log("File Save Error: ", error);
+    }
+}
+
+moved in fileActionController
+//file upload
+if (!existsSync(uploadsPath)) {
+    mkdirSync(uploadsPath);
+}
+
+// Configure Multer to store uploaded files in the 'uploads' directory
+const storage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+        console.log("uploadsPath ==== ", uploadsPath);
+        cb(null, uploadsPath);
+    },
+    filename: (_req, file, cb) => {
+        const timestamp = Date.now();
+        const filename = `${timestamp}-${file.originalname}`;
+        cb(null, filename);
+    },
+});
+
+const upload: Multer = multer({ storage });
+
+//file upload
+// @ts-ignore
+app.post('/upload', authenticateToken, upload.single('file'), async (req: Request, res: Response) => {
+    // @ts-ignore
+    const userId = req?.userId;
+    console.log("LoggedIn userId === ", userId);
+
+    if (!req.file) {
+        return res.status(400).json({ message: 'Invalid Data' });
+    }
+
+    try {
+        const uploadedFilePath = req.file.path;
+        const filename = req.file.filename;
+        // @ts-ignore
+        const fileResp = await storeFileToDB(filename, userId);
+        const uploadedFileId = fileResp?.insertedId?.toString();
+        console.log("uploadedFileId: ", uploadedFileId);
+        const documents = await loadAndSplitFile(uploadedFilePath);
+
+        // attche userId, uploaded file id with each document chunk:
+        // @ts-ignore
+        // const updatedDocuments = documents.map((document) => ({ ...document, metadata: { ...document.metadata, userId: userId, uploadedFileId: uploadedFileId } }));
+        const updatedDocuments = documents.map((document) => {
+            // @ts-ignore
+            const pageNumber = document?.metadata?.loc?.pageNumber;
+            return {
+                ...document,
+                pageContent: `${document.pageContent} pageNumber ${pageNumber}`,
+                metadata: { ...document.metadata, userId: userId, uploadedFileId: uploadedFileId }
+            }
+        });
+        // @ts-ignore
+        const flattenedDocuments = updatedDocuments.reduce((acc, val) => acc.concat(val), []);
+        const vectorStore = await getVectorStore();
+        await vectorStore.addDocuments(flattenedDocuments);
+        // @ts-ignore
+        res.status(200).json({ data: { uploadedFileId }, message: 'Documents added successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'An error occurred while adding documents' });
+    }
+});
+
+old chat api:
+// @ts-ignore
+app.post('/chat', async (req: Request, res: Response) => {
+    const { query } = req.body;
+    let response;
+
+    const contextVectorStore = await getVectorStore();
+    const memoryVectorStore = await getMemoryVectorStore();
+
+    const question = sanitizeInput(query);
+    const config = getConfig();
+    const context = await getRelevantContext(contextVectorStore, question, config.numContextDocumentsToRetrieve);
+    const history = await getRelevantContext(memoryVectorStore, question, config.numMemoryDocumentsToRetrieve);
+
+    try {
+        response = await chain.call({
+            input: question,
+            context,
+            history,
+            immediate_history: config.useWindowMemory ? windowMemory : '',
+        });
+
+        if (response) {
+            await addDocumentsToMemoryVectorStore([
+                // @ts-ignore
+                { content: question, metadataType: 'question', },
+                // @ts-ignore
+                { content: response?.text, metadataType: 'answer' },
+            ]);
+
+            // await logChat(chatLogDirectory, question, response.response);
+            await addChatLogs(question, response?.text)
+        }
+
+        res.status(200).json(response);
+    } catch (error) {
+        res.status(500).json({ error });
+    }
+})
+
+// @ts-ignore
+// same as /chat but using different chat model and different chains:
+app.post('/start-conversation', authenticateToken, async (req: Request, res: Response) => {
+    const uniqueId = uuidv4();
+    const { query,topicId } = req.body;
+    // @ts-ignore
+    const db = await connectToDatabase();
+    // @ts-ignore
+    const userId = req?.userId;
+    console.log("Logged In userId === ", userId);
+
+    const contextVectorStore = await getVectorStore();
+    // @ts-ignore
+    const filter = { userId: new ObjectId(userId) };
+    // @ts-ignore
+    const getFileByUserID = await db.collection('file_storage').findOne(filter);
+    const uploadedFileId = getFileByUserID?._id.toString()
+    // @ts-ignore
+    const memoryVectorStore = await getMemoryVectorStore(userId, uploadedFileId);
+
+    const question = sanitizeInput(query);
+    const config = getConfig();
+    const history = await getRelevantContext(memoryVectorStore, question, config.numMemoryDocumentsToRetrieve);
+    // const context = await getRelevantContext(contextVectorStore, question, 101);
+
+    // Using MMR in a vector store retriever
+    const retriever = await contextVectorStore.asRetriever({
+        searchType: "mmr",
+        searchKwargs: {
+            fetchK: 200,
+            lambda: 0.1,
+        },
+        filter: {
+            preFilter: {
+                "compound": {
+                    "must": [
+                        {
+                            "text": {
+                                "path": "userId",
+                                "query": userId
+                            }
+                        },
+                    ]
+                }
+            }
+        },
+        // k: 29
+        // k: 21 
+        k: 101
+    });
+
+    const retrieverOutput = await retriever.getRelevantDocuments(question);
+
+    const newContext = retrieverOutput
+        .map((doc) => doc.pageContent)
+        .join(', ')
+        .trim()
+        .replaceAll('\n', ' ');
+
+    const chat = new ChatOpenAI({
+        temperature: 0,
+        modelName: process.env.MODEL || "gpt-4-1106-preview"
+    });
+
+    const chatPrompt = ChatPromptTemplate.fromPromptMessages([
+        SystemMessagePromptTemplate.fromTemplate(
+            `The following is a friendly conversation between a human and an AI.
+           The AI is talkative and provides lots of specific details from its context.
+           If the AI does not know the answer to a question, it truthfully says it does not know.
+           You have access to the chat history with the user (CHATHISTORY/MEMORY) and to context (RELEVANTDOCS) provided by the user.
+           When answering think about whether the question refers to something in the MEMORY or CHATHISTORY before checking the RELEVANTDOCS.
+           Don’t justify your answers. Don't refer to yourself in any of the created content.
+
+           RELEVANTDOCS: {context}
+
+           CHATHISTORY: {history}
+
+           MEMORY: {immediate_history}
+           `
+        ),
+        new MessagesPlaceholder('context'),
+        new MessagesPlaceholder('history'),
+        new MessagesPlaceholder('immediate_history'),
+        HumanMessagePromptTemplate.fromTemplate('{input}'),
+    ]);
+
+    const windowMemory = getBufferWindowMemory();
+
+    const chain = new ConversationChain({
+        memory: windowMemory,
+        prompt: chatPrompt,
+        llm: chat,
+    });
+
+    try {
+        const response = await chain.call({
+            input: question,
+            context: newContext,
+            // context: context,
+            history: history,
+            immediate_history: config.useWindowMemory ? windowMemory : '',
+        });
+
+        if (response) {
+            await addDocumentsToMemoryVectorStore([
+                // @ts-ignore
+                { content: question, metadataType: 'question', qaPairID: uniqueId, userId: userId, uploadedFileId: uploadedFileId,topicId:topicId },
+                // @ts-ignore
+                { content: response?.response, metadataType: 'answer', qaPairID: uniqueId, userId: userId, uploadedFileId: uploadedFileId,topicId:topicId },
+            ]);
+        }
+
+        res.status(200).json(response);
+    } catch (error) {
+        res.status(400).json(error);
+    }
+
+})
+
+
+// chat over only specific file:
+app.post('/file/start-conversation', authenticateToken, async (req: Request, res: Response) => {
+    const uniqueId = uuidv4();
+    const { query, uploadedFileId, topicId } = req.body;
+
+    // @ts-ignore
+    const userId = req?.userId;
+    console.log("Logged In userId === ", userId);
+
+    const contextVectorStore = await getVectorStore();
+    const memoryVectorStore = await getMemoryVectorStore();
+
+    const question = sanitizeInput(query);
+    const config = getConfig();
+    const history = await getRelevantContext(memoryVectorStore, question, config.numMemoryDocumentsToRetrieve);
+    //   const context = await getRelevantContext(contextVectorStore, question, config.numContextDocumentsToRetrieve);
+
+    // Using MMR in a vector store retriever
+    const retriever = await contextVectorStore.asRetriever({
+        searchType: "mmr",
+        searchKwargs: {
+            //   fetchK: 50,
+            fetchK: 200,
+            lambda: 0.1,
+        },
+        filter: {
+            preFilter: {
+                "compound": {
+                    "must": [
+                        {
+                            "text": {
+                                "path": "userId",
+                                "query": userId
+                            }
+                        },
+                        {
+                            "text": {
+                                "path": "uploadedFileId",
+                                "query": uploadedFileId // file_storage id
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        // k: 31
+        k: 101
+    });
+
+    const retrieverOutput = await retriever.getRelevantDocuments(question);
+
+    const newContext = retrieverOutput
+        .map((doc) => doc.pageContent)
+        .join(', ')
+        .trim()
+        .replaceAll('\n', ' ');
+
+    const chat = new ChatOpenAI({
+        temperature: 0,
+        modelName: process.env.MODEL
+        // modelName: 'gpt-3.5-turbo-16k',
+        // modelName: 'gpt-4', // max token: 8192 tokens
+    });
+
+    const chatPrompt = ChatPromptTemplate.fromPromptMessages([
+        SystemMessagePromptTemplate.fromTemplate(
+            `The following is a friendly conversation between a human and an AI.
+           The AI is talkative and provides lots of specific details from its context.
+           If the AI does not know the answer to a question, it truthfully says it does not know.
+           You have access to the chat history with the user (CHATHISTORY/MEMORY) and to context (RELEVANTDOCS) provided by the user.
+           When answering think about whether the question refers to something in the MEMORY or CHATHISTORY before checking the RELEVANTDOCS.
+           Don’t justify your answers. Don't refer to yourself in any of the created content.
+
+           RELEVANTDOCS: {context}
+
+           CHATHISTORY: {history}
+
+           MEMORY: {immediate_history}
+           `
+        ),
+        new MessagesPlaceholder('context'),
+        new MessagesPlaceholder('history'),
+        new MessagesPlaceholder('immediate_history'),
+        HumanMessagePromptTemplate.fromTemplate('{input}'),
+    ]);
+
+    const windowMemory = getBufferWindowMemory();
+
+    const chain = new ConversationChain({
+        memory: windowMemory,
+        prompt: chatPrompt,
+        llm: chat,
+    });
+
+    try {
+        const response = await chain.call({
+            input: question,
+            context: newContext,
+            history: history,
+            immediate_history: config.useWindowMemory ? windowMemory : '',
+        });
+
+        if (response) {
+            await addDocumentsToMemoryVectorStore([
+                // @ts-ignore
+                { content: question, metadataType: 'question', qaPairID: uniqueId, userId: userId, uploadedFileId: uploadedFileId, topicId: topicId },
+                // @ts-ignore
+                { content: response?.response, metadataType: 'answer', qaPairID: uniqueId, userId: userId, uploadedFileId: uploadedFileId, topicId: topicId },
+            ]);
+        }
+
+        res.status(200).json(response);
+    } catch (error) {
+        console.log("Response Generaton Issue : ", error);
+        res.status(400).json(error);
+    }
+
+})
+
+
+// chat over multiple selected documents:
+app.post('/selected-files/start-conversation', authenticateToken, async (req: Request, res: Response) => {
+    const uniqueId = uuidv4();
+    const { query, uploadedFileIdz, topicId } = req.body;
+    let filesIdz = uploadedFileIdz.toString();
+    filesIdz = filesIdz.replace(/,/g, ', ');
+    console.log("filesIdz === ", filesIdz)
+    // @ts-ignore
+    const userId = req?.userId;
+    console.log("Logged In userId === ", userId);
+
+    const contextVectorStore = await getVectorStore();
+    const memoryVectorStore = await getMemoryVectorStore();
+
+    const question = sanitizeInput(query);
+    const config = getConfig();
+    const history = await getRelevantContext(memoryVectorStore, question, config.numMemoryDocumentsToRetrieve);
+    //   const context = await getRelevantContext(contextVectorStore, question, config.numContextDocumentsToRetrieve);
+
+    // Using MMR in a vector store retriever
+    const retriever = await contextVectorStore.asRetriever({
+        searchType: "mmr",
+        // searchType: "similarity",
+        // @ts-ignore
+        searchKwargs: {
+            //   fetchK: 50,
+            // fetchK: 100,
+            fetchK: 200,
+            lambda: 0.1,
+        },
+        filter: {
+            preFilter: {
+                "compound": {
+                    "must": [
+                        {
+                            "text": {
+                                "path": "userId",
+                                "query": userId
+                            }
+                        },
+                        {
+                            "text": {
+                                "path": "uploadedFileId",
+                                "query": filesIdz
+                                // "query": "6555a3bd6868a9d3270a3131 6555a44a6868a9d3270a3317 6555a5296868a9d3270a36f0 6555a5a46868a9d3270a387b 6555a4ba6868a9d3270a34fe" // works! file_storage id
+                            }
+                        },
+                        // {
+                        //     "text": {
+                        //         "path": "uploadedFileId",
+                        //         "query": uploadedFileId // file_storage id
+                        //     }
+                        // }
+                        // ...formattedFilters
+                    ]
+                }
+            }
+        },
+        // k: 21
+        k: 101
+    });
+
+    const retrieverOutput = await retriever.getRelevantDocuments(question);
+
+    const newContext = retrieverOutput
+        .map((doc) => doc.pageContent)
+        .join(', ')
+        .trim()
+        .replaceAll('\n', ' ');
+
+    const chat = new ChatOpenAI({
+        temperature: 0,
+        modelName: process.env.MODEL || "gpt-4-1106-preview"
+        // modelName: 'gpt-3.5-turbo-16k',
+        // modelName: 'gpt-4', // max token: 8192 tokens
+    });
+
+    const chatPrompt = ChatPromptTemplate.fromPromptMessages([
+        SystemMessagePromptTemplate.fromTemplate(
+            `The following is a friendly conversation between a human and an AI.
+           The AI is talkative and provides lots of specific details from its context.
+           If the AI does not know the answer to a question, it truthfully says it does not know.
+           You have access to the chat history with the user (CHATHISTORY/MEMORY) and to context (RELEVANTDOCS) provided by the user.
+           When answering think about whether the question refers to something in the MEMORY or CHATHISTORY before checking the RELEVANTDOCS.
+           Don’t justify your answers. Don't refer to yourself in any of the created content.
+
+           RELEVANTDOCS: {context}
+
+           CHATHISTORY: {history}
+
+           MEMORY: {immediate_history}
+           `
+        ),
+        new MessagesPlaceholder('context'),
+        new MessagesPlaceholder('history'),
+        new MessagesPlaceholder('immediate_history'),
+        HumanMessagePromptTemplate.fromTemplate('{input}'),
+    ]);
+
+    const windowMemory = getBufferWindowMemory();
+
+    const chain = new ConversationChain({
+        memory: windowMemory,
+        prompt: chatPrompt,
+        llm: chat,
+    });
+
+    try {
+        const response = await chain.call({
+            input: question,
+            context: newContext,
+            history: history,
+            immediate_history: config.useWindowMemory ? windowMemory : '',
+        });
+
+        if (response) {
+            await addDocumentsToMemoryVectorStore([
+                // @ts-ignore
+                { content: question, metadataType: 'question', qaPairID: uniqueId, userId: userId, topicId: topicId, uploadedFileIds: uploadedFileIdz },
+                // @ts-ignore
+                { content: response?.response, metadataType: 'answer', qaPairID: uniqueId, userId: userId, topicId: topicId, uploadedFileIds: uploadedFileIdz },
+            ]);
+        }
+
+        res.status(200).json(response);
+    } catch (error) {
+        console.log("Response Generaton Issue : ", error);
+        res.status(400).json(error);
+    }
+
+})
+
+
+ const callbackManager = CallbackManager.fromHandlers({
+     // This function is called when the LLM generates a new token (i.e., a prediction for the next word)
+    // @ts-ignore
+//     async handleLLMNewToken(token: string) {
+//         // Write the token to the output stream (i.e., the console)
+//         // output.write(token);
+//     },
+// });
+
+// const llm = new OpenAIChat({
+//     streaming: true,
+//     callbackManager,
+//     modelName: process.env.MODEL || 'gpt-4-1106-preview',
+// });
+
+// const systemPromptTemplate = fs.readFileSync(path.join(projectRootDir, 'src/prompt.txt'), 'utf8');
+
+// const systemPrompt = SystemMessagePromptTemplate.fromTemplate(oneLine`
+//   ${systemPromptTemplate}
+// `);
+
+// const chatPrompt = ChatPromptTemplate.fromPromptMessages([
+//     systemPrompt,
+//     HumanMessagePromptTemplate.fromTemplate('QUESTION: """{input}"""'),
+// ]);
+
+// const windowMemory = getBufferWindowMemory();
+
+// const chain = new LLMChain({
+//     prompt: chatPrompt,
+//     memory: windowMemory,
+//     llm,
+// });
+
+// TODO: move to memorymanager.
+// async function addDocumentsToMemoryVectorStore(documents: Array<{ content: string; metadataType: string, qaPairID: string, userId: string, uploadedFileId: string, topicId: string, uploadedFileIds: string }>): Promise<void> {
+//     const formattedDocuments = documents.map(
+//         //@ts-ignore
+//         (doc) => new Document({ pageContent: doc.content, metadata: { type: doc.metadataType, qaPairID: doc.qaPairID, userId: doc.userId, uploadedFileId: doc.uploadedFileId, topicId: doc.topicId, uploadedFileIds: doc.uploadedFileIds } })
+//     );
+
+//     const memoryVectorStore = await getMemoryVectorStore();
+//     await memoryVectorStore.addDocuments(formattedDocuments);
+// }
+
+// @ts-ignore
+app.post('/chat', async (req: Request, res: Response) => {
+    const { query } = req.body;
+    let response;
+
+    const contextVectorStore = await getVectorStore();
+    const memoryVectorStore = await getMemoryVectorStore();
+
+    const question = sanitizeInput(query);
+    const config = getConfig();
+    const context = await getRelevantContext(contextVectorStore, question, config.numContextDocumentsToRetrieve);
+    const history = await getRelevantContext(memoryVectorStore, question, config.numMemoryDocumentsToRetrieve);
+
+    try {
+        response = await chain.call({
+            input: question,
+            context,
+            history,
+            immediate_history: config.useWindowMemory ? windowMemory : '',
+        });
+
+        if (response) {
+            await addDocumentsToMemoryVectorStore([
+                 // @ts-ignore
+                 { content: question, metadataType: 'question', },
+                   // @ts-ignore
+                 { content: response?.text, metadataType: 'answer' },
+             ]);
+
+             // await logChat(chatLogDirectory, question, response.response);
+            await addChatLogs(question, response?.text)
+        }
+
+        res.status(200).json(response);
+    } catch (error) {
+        res.status(500).json({ error });
+    }
+})
+
+
+// import express, { Request, Response } from 'express';
+// import multer, { Multer } from 'multer';
+// import path, { dirname, join } from 'path';
+// import fs, { existsSync, mkdirSync } from 'fs';
+// import fs from 'fs';
+// import { getConfig, getProjectRoot } from './config/index.js';
+// import { loadAndSplitFile, } from "./lib/contextManager.js"
+// import { getBufferWindowMemory } from "./lib/memoryManager.js"
+// import { getRelevantContext } from "./lib/vectorStoreUtils.js"
+// import sanitizeInput from "./utils/sanitizeInput.js"
+// import { CallbackManager } from 'langchain/callbacks';
+// import { OpenAIChat } from 'langchain/llms/openai';
+// import { ChatPromptTemplate, HumanMessagePromptTemplate, SystemMessagePromptTemplate } from 'langchain/prompts';
+// import { oneLine } from 'common-tags';
+// import { LLMChain } from 'langchain/chains';
+// import { getVectorStore, getMemoryVectorStore, addChatLogs } from "./lib/dbVectorStore.js"
+// import { MongoClient, ObjectId } from "mongodb";
+// import { Document } from 'langchain/document';
+// import { authenticateToken } from './middleware/authenticate.js';
+// Temporary Imports
+// import { ConversationChain } from "langchain/chains";
+// import { ChatOpenAI } from "langchain/chat_models/openai";
+// import {
+//     MessagesPlaceholder,
+// } from "langchain/prompts";
+// import { BufferMemory } from "langchain/memory";
+// import { v4 as uuidv4 } from 'uuid';
+// const projectRootDir = getProjectRoot();
+// const chatLogDirectory = path.join(projectRootDir, 'chat_logs');
+
+
+package.json old start command:
+    "start": "npm run build && node -r dotenv/config dist/index.js",
+
+package.json new start command:
+    "start": "npm run build && node -r dotenv/config dist/app-prod.js",
+
+
+
+    =============
+
+
+    1Pageof2
+Commodity Code Description 
+Package Qty 
+340239Other anionic organic surface-20ST1
+Payable by 26-SEP-2023 
+Our invoices are payable in full to CMA CGM by the indicated due date. Payment shall 
+be made for full amount on or prior due date, free of charges, without any deduction nor 
+discount for advance payment.
+All bank charges are for the account of the payer-remitter. All overdue payments 
+shall bear interest @ 18% per annum. subject to Mumbai Jurisdiction. E & O.E.  
+HDFC BANK LTD.  
+HDFC BANK LTD  
+MANEKJI WADIA BLDG THIRD FLOOR  
+NANIK MOTWANI MARG FORT  
+MUMBAI  
+400001 INDIA MH  
+Account Number.00600350059592  
+Agent:CMA CGM Agencies (India) Private Limited,Regd. Office Address: 8th Floor, Tower-3, One International Centre, Senapati Bapat Marg, 
+Elphinstone road, Mumbai Maharashtra India 400013 ,CIN No – U63012MH2008PTC360950 Tel: +91 22 6842 1700/Email: mby.genmbox@cma-
+Elphinstone road, Mumbai Maharashtra India 400013 ,CIN No – U63012MH2008PTC360950 Tel: +91 22 6842 1700/Email: mby.genmbox@cma-
+cgm.com/Website:www.cma-cgm.com , CMA CGM SA, PAN No: AABCC9048G. Invoice issued by CCAI for and on behalf of CMA CGM SA.
+CMA CGM SA, C/O. CCAI *
+ONE INTERNATIONAL CENTRE
+TOWER 3 - 8TH FL SENAPATI
+BAPAT MARG, ELPHINSTONE WEST
+MUMBAI/400013
+INDIA
+TEL:+91 22 3988 8999    FAX:+91 22 3345 1990
+Load Port: 
+NHAVA SHEVA
+SEGU1993971
+Place of Delivery: 
+-
+Place of Receipt: 
+-
+Discharge Port: 
+HODEIDAH
+RTGS / NEFT IFSC code HDFC0000240  
+Call Date: 
+27 JUL 2023
+Sushma PRAJAPATI
+     
+Contact_info
+CMA CGM AGENCIES (INDIA) PVT LTD.
+ONE INTERNATIONAL CENTRE
+TOWER 3 - 8TH FL SENAPATI
+BAPAT MARG, ELPHINSTONE WEST
+MUMBAI/400013
+INDIA
+TEL:+91 22 3988 8999    FAX:+91 22 3345 1990
+Payable to: 
+Invoice To: 
+TRANSWORLD INTEGRATED LOGISTEK PVT LTD
+LEVEL 3 TOWER II D 301 305
+SEAWOODS GRAND CENTRAL PLOT R1
+SECTOR 40 NERUL NODE
+MUMBAI/400706
+INDIA
+GSTIN: 27AAGCB5005K1ZR
+Payable to: 
+Invoice To: 
+TRANSWORLD INTEGRATED LOGISTEK PVT LTD
+LEVEL 3 TOWER II D 301 305
+SEAWOODS GRAND CENTRAL PLOT R1
+SECTOR 40 NERUL NODE
+MUMBAI/400706
+INDIA
+GSTIN: 27AAGCB5005K1ZR   
+Quote Reference: QSPOT3874326     Service Contract:  -     
+(C)For and on behalf of CMA - CGM
+BOULEVARD JACQUES SAADE
+4 QUAI D'ARENC
+CEDEX 02
+13235 MARSEILLE-FRANCE
+Carrier No. 
+INCMA8548020
+                                     PAN : 
+0PE73W1MA   -   
+APL SALALAH     
+Invoiced By: 
+Voyage: 
+Container Number(s): 
+Local Voyage Ref: Vessel: 
+Cust. Ref: 
+Payment_info
+AMC2092900  
+-  
+Customer: 
+0004429046/001
+Date: 12-SEP-2023
+INEMH972948
+DUPLICATE** 1 OF 1EXPORT INVOICE 
+Bill of Lading: 
+Amount in INRTax Based on Rate Currency Amount Size/Type Charge Description 
+ 14,116.86
+Rate of Exchange 
+Currency Charge Totals 
+USD 165.00
+Total Excluding Tax 
+Total GST TAX 
+ 2,541.03
+Bill of Lading Amendment Fee
+FIX20ST
+USD
+ 165.00 14,116.86
+1C
+GH
+ 165.00
+1 USD = 85.556750 INR
+Rate of Exchange 
+Currency Charge Totals 
+USD 165.00
+Total Excluding Tax 
+Total GST TAX 
+ 2,541.03
+Bill of Lading Amendment Fee
+FIX20ST
+USD
+ 165.00 14,116.86
+1C
+GH
+ 165.00
+1 USD = 85.556750 INR
+Service Description POS State Taxable Amt. Tax Amount 
+MAHARASHTRA
+ 14,116.86
+ 14,116.86
+ 1,270.51
+ 1,270.52
+SAC 
+996799
+996799
+MH CGST @ 9% BL AMENDMENT
+MH SGST @ 9% BL AMENDMENT
+POSP Place Of 
+Service Provider:
+CMA CGM SA, C/O. CCAI
+ONE INTERNATIONAL CENTRE
+TOWER 3 - 8TH FL SENAPATI
+BAPAT MARG, ELPHINSTONE WEST
+MUMBAI
+400013
+GSTIN: 27AABCC9048G1ZL
+Other Service Charges
+Total CGST
+Total SGSTMAHARASHTRA
+ 1,270.51
+ 1,270.52
+INR
+INR
+GST Tax applied as indicated on charges 
+INR
+Total Amount: 
+ 16,657.89
+Total Including Tax 
+**DUPLICATE FOR SUPPLIER
+TAX INVOICE 
+Tax 
+GH
+GH
+IRN: 
+53baff5fa4ab71effff8af07d747001196
+470b114d81584b2fab0defdb04cdf4
+Ack. No.: 122318157771955
+Ack. Date: 12-SEP-2023 10:46:00
+Rate Application Date: 28-JUL-2023
+22Pageof
+Payable by 26-SEP-2023 
+Our invoices are payable in full to CMA CGM by the indicated due date. Payment shall 
+be made for full amount on or prior due date, free of charges, without any deduction nor 
+discount for advance payment.
+All bank charges are for the account of the payer-remitter. All overdue payments 
+shall bear interest @ 18% per annum. subject to Mumbai Jurisdiction. E & O.E.  
+HDFC BANK LTD.  
+HDFC BANK LTD  
+MANEKJI WADIA BLDG THIRD FLOOR  
+NANIK MOTWANI MARG FORT  
+MUMBAI  
+400001 INDIA MH  
+Account Number.00600350059592  
+Agent:CMA CGM Agencies (India) Private Limited,Regd. Office Address: 8th Floor, Tower-3, One International Centre, Senapati Bapat Marg, 
+Elphinstone road, Mumbai Maharashtra India 400013 ,CIN No – U63012MH2008PTC360950 Tel: +91 22 6842 1700/Email: mby.genmbox@cma-
+cgm.com/Website:www.cma-cgm.com , CMA CGM SA, PAN No: AABCC9048G. Invoice issued by CCAI for and on behalf of CMA CGM SA.
+CMA CGM SA, C/O. CCAI *
+ONE INTERNATIONAL CENTRE
+cgm.com/Website:www.cma-cgm.com , CMA CGM SA, PAN No: AABCC9048G. Invoice issued by CCAI for and on behalf of CMA CGM SA.
+CMA CGM SA, C/O. CCAI *
+ONE INTERNATIONAL CENTRE
+TOWER 3 - 8TH FL SENAPATI
+BAPAT MARG, ELPHINSTONE WEST
+MUMBAI/400013
+INDIA
+TEL:+91 22 3988 8999    FAX:+91 22 3345 1990
+RTGS / NEFT IFSC code HDFC0000240  
+(C)For and on behalf of CMA - CGM
+BOULEVARD JACQUES SAADE
+4 QUAI D'ARENC
+CEDEX 02
+13235 MARSEILLE-FRANCE
+Carrier No. 
+INCMA8548020
+Cust. Ref: 
+Payment_info
+AMC2092900  
+-  
+Customer: 
+0004429046/001
+Date: 12-SEP-2023
+INEMH972948
+DUPLICATE** 1 OF 1EXPORT INVOICE 
+Bill of Lading: 
+Electronic Invoice - No Signature/Stamp required.  GST Tax is levied on taxable service provided by company. For online payment confirmation, 
+please write a message to mby.rtgsconfirmation@cma-cgm.com.
+No Tax is payable on Reverse Charge
+Invoice payment through Online mode available, You can make payment using NEFT/RTGS, Debit/Credit Card and Net banking
+No Tax is payable on Reverse Charge
+Invoice payment through Online mode available, You can make payment using NEFT/RTGS, Debit/Credit Card and Net banking
+In case of any GST related query, revert within 45 days from the date of Invoice for rectification purpose.
+Making payment through UPI ID or QR Code or Rupay Debit Card, refer our client advisory available on our website
+http://www.cma-cgm.com/static/IN/Attachments/Client%20Advisory%20-
+%20Mandatory%20Implementation%20of%20Electronic%20Modes%20CCAI-347-310120.pdf
+G.M.- Customer Service & Documentation
+Nilima PALAV
+Signature
+INR
+Total Amount: 
+ 16,657.89
+ 16,657.89
+**DUPLICATE FOR SUPPLIER
+TAX INVOICE 
+Digitally signed by CMA CGM AGENCIES INDIA PRIVATE LIMITED
+Date: 2023.09.12 05:17:29 UTC
+Local Date: 2023.09.12 10:47:29 IST
+Location: India
+Signature Not Verified
+
+
+// old prompts:
+// #1
+// const systemPrompt = SystemMessagePromptTemplate.fromTemplate(oneLine`
+//   The following is a friendly conversation between a human and an AI.
+//   The AI is talkative and provides lots of specific details from its context.
+//   If the AI does not know the answer to a question, it truthfully says it does not know.
+//   You have access to the chat history with the user (CHATHISTORY/MEMORY) and to context (RELEVANTDOCS) provided by the user.
+//   When answering think about whether the question refers to something in the MEMORY or CHATHISTORY before checking the RELEVANTDOCS.
+//   Don’t justify your answers. Don't refer to yourself in any of the created content.
+
+//   RELEVANTDOCS: {context}
+
+//   CHATHISTORY: {history}
+
+//   MEMORY: {immediate_history}
+// `);
+
+// #2
+// const systemPrompt = SystemMessagePromptTemplate.fromTemplate(oneLine`
+//   In this conversation between a Human and an AI, the AI is talkative and provides details from its context.
+
+//   IMPORTANT: The AI should ONLY answer questions based on the information available in the chat history (CHATHISTORY/MEMORY) and the context provided by the user (RELEVANTDOCS).
+//   If the AI does not find relevant information in these sources, it should truthfully say it does not know.
+
+//   You have access to the chat history with the user (CHATHISTORY/MEMORY) and to context (RELEVANTDOCS) provided by the user.
+//   When responding, prioritize information from the MEMORY or CHATHISTORY before checking the RELEVANTDOCS.
+//   Avoid generating answers if the information is not present in the provided context or chat history.
+
+//   RELEVANTDOCS: {context}
+
+//   CHATHISTORY: {history}
+
+//   MEMORY: {immediate_history}
+// `);
+
+// #3
+
+
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
